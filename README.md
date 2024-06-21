@@ -8,9 +8,9 @@ pip install -r requirements.txt
 ## Running Analysis for Spain
 
 Download all the datasets from Zenodo:
-[https://zenodo.org/api/records/12207212/files-archive]([url](https://zenodo.org/api/records/12207212/files-archive))
+* [https://zenodo.org/api/records/12207212/files-archive](https://zenodo.org/api/records/12207212/files-archive)
 
-unzip the file and move all files into the data folder.
+Unzip the download file and move all files into the `data/` folder within the project.
 
 Run the following command to set up Spain data:
 

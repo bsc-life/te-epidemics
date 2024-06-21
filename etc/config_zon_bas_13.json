@@ -1,0 +1,10 @@
+{
+    "data_folder"       : "data",
+    "start_date"        : "2020-03-01",
+    "end_date"          : "2021-05-01",
+    "filter_patches": ["000"],
+    "cases_rolling_window": 7,
+    "trips_rolling_window": 7,
+    "active_cases_days" : 10,
+    "risk_normalization_var": "total_population"
+}

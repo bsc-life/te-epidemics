@@ -1,3 +1,7 @@
+outputs/*
+data/*.parquet
+data/*.geojson
+data/*.csv
 venv/
 env/
 .venv/

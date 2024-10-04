@@ -132,7 +132,9 @@ def error_callback(e):
 def log_result(result):
     RESULT_LIST.append(result)
 
-def calculate_te(source, target, TE_x="risk_ij", s=1, omega=21, delta=5, k=1, **kargs):
+def calculate_te(source, target, TE_x="risk_ij", s=1, 
+                 omega=21, delta=5, k=1, ETE=False, shuffles=100,
+                 **kargs):
     if TE_x=="risk_ij":
         X_ij = X.loc[source, target, :].to_pandas()
     elif TE_x=="risk_hat_ij":
@@ -142,7 +144,7 @@ def calculate_te(source, target, TE_x="risk_ij", s=1, omega=21, delta=5, k=1, **
     elif TE_x=="new_cases":
         X_ij = Y.loc[source, :].to_pandas()
     else:
-        raise Exception(f"Unknown TEx param {TEx}")
+        raise Exception(f"Unknown TEx param {TE_x}")
 
     Y_j = Y.loc[target, :].to_pandas()
         
@@ -161,10 +163,20 @@ def calculate_te(source, target, TE_x="risk_ij", s=1, omega=21, delta=5, k=1, **
         return (source, target, TE)
     
     for j,i in enumerate(range(0, n_points, s)):
-        x = X_ij[i:i+omega]
-        y = Y_j[i+delta:i+delta+omega]
-        TE[j] = transfer_entropy(x, y, k)
-    
+        x = X_ij[i:i+omega].values
+        y = Y_j[i+delta:i+delta+omega].values
+        TE_xy = transfer_entropy(x, y, k)
+
+        if ETE:
+            TE_xy_s = 0
+            for i in range(shuffles):
+                np.random.shuffle(x)
+                TE_xy_s += transfer_entropy(x, y, k)
+            TE_xy_s = TE_xy_s / shuffles
+            TE[j] = TE_xy - TE_xy_s
+        else:
+            TE[j] = TE_xy
+   
     return (source, target, TE)
 
 def results2xarray(data, patches_ids, date_range):
@@ -221,6 +233,12 @@ def create_parser():
     parser.add_argument("-c", "--cpus", action="store", dest="cpus", default=None, type=int,
                          help="Nº of cpus use for parallel calculation")
 
+    parser.add_argument("--ete", action="store_true",
+                         help="Calculate ETE using shuffles")
+    
+    parser.add_argument("--shuffles", action="store", dest="shuffles", default=100, type=int,
+                         help="Nº shuffles to compute ETE")
+
     parser.add_argument("--debug", action="store_true",
                          help="Run a single TE calculation for debuggin prouposes")
 
@@ -263,13 +281,15 @@ def main():
     embedding_params["symmetric_binning"] = args.symmetric_binning
 
     te_params = {}
-    te_params["k"]         = args.k
-    te_params["omega"]     = args.omega
-    te_params["delta"]     = args.delta
-    te_params["s"]         = args.s
-    te_params["TE_x"]      = args.TE_x
-    te_params["TE_y"]      = args.TE_y
-    
+    te_params["k"]        = args.k
+    te_params["omega"]    = args.omega
+    te_params["delta"]    = args.delta
+    te_params["s"]        = args.s
+    te_params["TE_x"]     = args.TE_x
+    te_params["TE_y"]     = args.TE_y
+    te_params["ETE"]      = args.ete
+    te_params["shuffles"] = args.shuffles
+
     # Getting the data folder
     base_folder = os.path.join(project_root, base_folder)
     assert os.path.exists(base_folder)
@@ -291,6 +311,8 @@ def main():
     assert cases_ds.coords['id'].shape   == risk_ds.coords['target'].shape
 
     params_strn = f"w{args.omega}_d{args.delta}_{str.upper(args.embedding[0])}"
+    if args.ete:
+        params_strn = f"ETE_{params_strn}"
     if args.embedding == "uniform":
         aux = str.upper(str(args.symmetric_binning)[0])
         params_strn += f"_nbin{args.nbins}_sb{aux}"

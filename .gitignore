@@ -1,7 +1,10 @@
+notebooks/.ipynb_checkpoints/*
 outputs/*
+data/*.npy
 data/*.parquet
 data/*.geojson
 data/*.csv
+data/SIR_mobility_matrices
 venv/
 env/
 .venv/

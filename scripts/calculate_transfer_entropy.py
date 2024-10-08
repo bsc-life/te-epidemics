@@ -211,10 +211,10 @@ def create_parser():
     
     parser.add_argument("base_folder", help="Folder where the processed data is located")
 
-    parser.add_argument("-w", "--omega", action="store", dest="omega", default=21, type=int,
+    parser.add_argument("-w", "--omega", action="store", dest="omega", default=28, type=int,
                          help="Omega parameter for the TE. is the lenght of the sliding window")
     
-    parser.add_argument("-d", "--delta", action="store", dest="delta", default=7, type=int,
+    parser.add_argument("-d", "--delta", action="store", dest="delta", default=14, type=int,
                          help="Detal (delay) parameter for the TE")
     
     parser.add_argument("-s", dest="s", default=1, type=int,

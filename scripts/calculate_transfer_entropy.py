@@ -79,7 +79,6 @@ def encode_data(data, diff=True, embedding="standard", q1=-1, q2=1, m=3):
 
     if diff:
         data = data.diff('date')
-        data = data.diff('date')
 
     #####################
     # STANDARD EMBEDDING
@@ -138,9 +137,7 @@ def error_callback(e):
 def log_result(result):
     RESULT_LIST.append(result)
 
-def effective_transfer_entropy(X, Y, k=1, shuffles=500):
-    x = X.copy()
-    y = Y.copy()
+def effective_transfer_entropy(x, y, k=1, shuffles=500):
     TE_xy = transfer_entropy(x, y, k=1)
     TE_xy_s = 0
     for i in range(shuffles):
@@ -148,7 +145,8 @@ def effective_transfer_entropy(X, Y, k=1, shuffles=500):
         TE_xy_s += transfer_entropy(x, y, k=1)
     TE_xy_s /= shuffles
 
-    return TE_xy - TE_xy_s
+    ETE_xy = TE_xy - TE_xy_s
+    return ETE_xy
 
 def calculate_te(source, target, TE_x="risk_ij", s=1, 
                  omega=21, delta=5, k=1, ETE=False, shuffles=500,
@@ -165,7 +163,7 @@ def calculate_te(source, target, TE_x="risk_ij", s=1,
         raise Exception(f"Unknown TEx param {TE_x}")
 
     Y_j = Y.loc[target, :].to_pandas()
-        
+
     assert X_ij.shape[0] == Y_j.shape[0]
     
     L = Y_j.shape[0]
@@ -178,13 +176,14 @@ def calculate_te(source, target, TE_x="risk_ij", s=1,
         return (source, target, TE)
     
     for j,i in enumerate(range(0, n_points, s)):
-        x = X[i:i+omega]
-        y = Y[i+delta:i+delta+omega]
+        x = X_ij[i:i+omega].values.copy()
+        y = Y_j[i+delta:i+delta+omega].values.copy()
         if ETE:
             TE[j] = effective_transfer_entropy(x, y, k=k, shuffles=shuffles)
         else:
             TE[j] = transfer_entropy(x, y, k)
    
+    TE[TE < 0] = 0
     return (source, target, TE)
 
 def results2xarray(data, patches_ids, date_range):
@@ -229,10 +228,10 @@ def create_parser():
     parser.add_argument("-e", "--embedding", dest="embedding", action="store", default="standard",
                          help="Type of embedding used to convert data", choices=EMBEDDINGS)
     
-    parser.add_argument("-q1", "--q1", action="store", dest="q1", default=-1., type=float,
+    parser.add_argument("-q1", "--q1", action="store", dest="q1", default=-1, type=float,
                          help="Q1 used to discretize data")
     
-    parser.add_argument("-q2", "--q2", action="store", dest="q2", default=21., type=float,
+    parser.add_argument("-q2", "--q2", action="store", dest="q2", default=1, type=float,
                          help="Q2 used to discretize data")
    
     parser.add_argument("-x", "--TEx", dest="TE_x", action="store", default="risk_ij",
@@ -244,7 +243,7 @@ def create_parser():
     parser.add_argument("--use_ete", action="store", dest="use_ete", default=True, 
                          help="Calculate ETE using shuffles")
 
-    parser.add_argument("--shuffles", action="store", dest="shuffles", default=100, type=int,
+    parser.add_argument("--shuffles", action="store", dest="shuffles", default=500, type=int,
                          help="Nº shuffles to compute ETE")
     
     parser.add_argument("-c", "--cpus", action="store", dest="cpus", default=None, type=int,
@@ -328,7 +327,7 @@ def main():
         params_strn = "TE"
     params_strn += f"_w{args.omega}_d{args.delta}_{str.upper(args.embedding[0])}"
     if args.embedding == "standard":
-        params_strn += f"_q1{args.q1}_q2{args.q2}"
+        params_strn += f"_Q1_{args.q1}_Q2_{args.q2}"
 
     params_strn += f"_{args.TE_x}"
     print(f"- Creating output folder for storing run outpus, config, etc:")
@@ -360,18 +359,26 @@ def main():
     print(f"Encoding data using \"{args.embedding}\" embedding")
     
     if TE_x == "risk_ij" or TE_x == "risk_hat_ij":
-        X = risk_ds[TE_x]
+        X = encode_data(risk_ds[TE_x], **embedding_params)
     else:
-        X = cases_ds[TE_y]
+        X = encode_data(cases_ds[TE_y], **embedding_params)
 
-    X = encode_data(X, **embedding_params)
     Y = encode_data(cases_ds[TE_y], **embedding_params)
 
-    print(f"- Calculating Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
-    print(f"- TE_xy using {TE_x} as variable in X and {TE_y} as variable in Y")
+    X_fname  = os.path.join(output_folder, "X.nc")
+    X.to_netcdf(X_fname)
+    Y_fname  = os.path.join(output_folder, "Y.nc")
+    Y.to_netcdf(Y_fname)
+
+    print("X ts shape:", X.shape)
+    print("Y ts shape:", Y.shape)
+
+    print(f"- Using {TE_x} as variable in X and {TE_y} as variable in Y")
     print(f"- Parameters used:")
     for k,v in te_params.items():
         print(f"\t* {k}: {v}")
+
+    print(f"- Calculating Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
 
     RESULT_LIST = []
     if debug:

@@ -41,6 +41,25 @@ from pyinform import transfer_entropy
 # Functions for encoding data into a symbolic embedding
 #########################################################################
 
+def pathological_cases(x, m):
+    offset = math.factorial(m)
+    if x[0] == x[1] and x[1] == x[2]:# ee
+        return offset
+    if x[0] == x[1] and x[1] < x[2]: # eu
+        return offset+1
+    if x[0] < x[1] and x[1] == x[2]: # ue
+        return offset+2
+    if x[0] == x[1] and x[1] > x[2]: # ue
+        return offset+3
+    if x[0] > x[1] and x[1] == x[2]: # ue
+        return offset+4
+    if x[0] > x[1] and x[0] == x[2]: # ue
+        return offset+5
+    if x[0] < x[1] and x[0] == x[2]: # ue
+        return offset+6
+    print(x)
+    raise Exception("Unknown pattern")
+
 def symbolic_embedding(x, m): 
     symbols_dict = {tuple(s):i for i,s in enumerate(list(permutations(range(m))))}
     L = x.shape[0]
@@ -55,39 +74,26 @@ def symbolic_embedding(x, m):
         y[i] = s
     return np.array(y, dtype=int)
 
-def encode_data(data, embedding="round", nbins=20, scale=100, symmetric_binning=True, m=3):
+def encode_data(data, diff=True, embedding="standard", q1=-1, q2=1, m=3):
     xa_encoded_data = None
+
+    if diff:
+        data = data.diff('date')
+        data = data.diff('date')
+
+    #####################
+    # STANDARD EMBEDDING
+    #####################
+    if embedding == "standard":
+        bins = [q1, q2]
+        my_digitize = lambda x,bins: np.digitize(x, bins, right=False)
+        xa_encoded_data = xr.apply_ufunc(my_digitize, data, bins)
 
     #####################
     # ROUND EMBEDDING
     #####################
     if embedding == "round":
         xa_encoded_data = data.round()
-        
-    #####################
-    # UNIFORM EMBEDDING
-    #####################
-    if embedding == "uniform":
-        bins = np.linspace(0, scale,  nbins)
-        # ENCODE CASES DATA DIM=2
-        if len(data.dims) == 2:
-            if symmetric_binning:
-                XMax = float(data.max().values)
-            else:
-                XMax = data.max('date').values
-            data = (data.T / XMax).T * scale
-        # ENCODE RISK/MOVILITY DATA DIM=3
-        elif len(data.dims) == 3:
-            XMax = data.max('date').values
-            if symmetric_binning:
-                XMax[XMax-XMax.T < 0] = 0
-                XMax += XMax.T
-                np.fill_diagonal(XMax, 1)
-            data = data.transpose('date', 'source', 'target') / XMax * scale
-            data = data.transpose('source', 'target', 'date')
-        
-        my_digitize = lambda x,bins: np.digitize(x, bins, right=False)
-        xa_encoded_data = xr.apply_ufunc(my_digitize, data, bins)
 
     #####################
     # SYMBOLIC EMBEDDING
@@ -132,8 +138,20 @@ def error_callback(e):
 def log_result(result):
     RESULT_LIST.append(result)
 
+def effective_transfer_entropy(X, Y, k=1, shuffles=500):
+    x = X.copy()
+    y = Y.copy()
+    TE_xy = transfer_entropy(x, y, k=1)
+    TE_xy_s = 0
+    for i in range(shuffles):
+        np.random.shuffle(x)
+        TE_xy_s += transfer_entropy(x, y, k=1)
+    TE_xy_s /= shuffles
+
+    return TE_xy - TE_xy_s
+
 def calculate_te(source, target, TE_x="risk_ij", s=1, 
-                 omega=21, delta=5, k=1, ETE=False, shuffles=100,
+                 omega=21, delta=5, k=1, ETE=False, shuffles=500,
                  **kargs):
     if TE_x=="risk_ij":
         X_ij = X.loc[source, target, :].to_pandas()
@@ -158,24 +176,14 @@ def calculate_te(source, target, TE_x="risk_ij", s=1,
     # Filter self loops
     if source == target: 
         return (source, target, TE)
-    # Speed-up to avoid calculating cases where there is no risk between i and j
-    if X_ij.max() == 0:
-        return (source, target, TE)
     
     for j,i in enumerate(range(0, n_points, s)):
-        x = X_ij[i:i+omega].values
-        y = Y_j[i+delta:i+delta+omega].values
-        TE_xy = transfer_entropy(x, y, k)
-
+        x = X[i:i+omega]
+        y = Y[i+delta:i+delta+omega]
         if ETE:
-            TE_xy_s = 0
-            for i in range(shuffles):
-                np.random.shuffle(x)
-                TE_xy_s += transfer_entropy(x, y, k)
-            TE_xy_s = TE_xy_s / shuffles
-            TE[j] = TE_xy - TE_xy_s
+            TE[j] = effective_transfer_entropy(x, y, k=k, shuffles=shuffles)
         else:
-            TE[j] = TE_xy
+            TE[j] = transfer_entropy(x, y, k)
    
     return (source, target, TE)
 
@@ -214,40 +222,42 @@ def create_parser():
 
     parser.add_argument("-k", default=1, type=int,
                          help="k parameter for the TE. Is the memory of the process")
-    
-    parser.add_argument("-e", "--embedding", dest="embedding", action="store", default="round",
+
+    parser.add_argument("--diff", action="store", dest="diff", default=True, 
+                         help="Apply first order difference to time series")
+
+    parser.add_argument("-e", "--embedding", dest="embedding", action="store", default="standard",
                          help="Type of embedding used to convert data", choices=EMBEDDINGS)
     
-    parser.add_argument("-b", "--nbins", action="store", dest="nbins", default=20, type=int,
-                         help="Nº of bins to use in the uniform embeding")
-
-    parser.add_argument("--symmetric_binning", action="store_true",
-                         help="Wheather to perform or not a symmetric (uniform) binning")
+    parser.add_argument("-q1", "--q1", action="store", dest="q1", default=-1., type=float,
+                         help="Q1 used to discretize data")
+    
+    parser.add_argument("-q2", "--q2", action="store", dest="q2", default=21., type=float,
+                         help="Q2 used to discretize data")
    
     parser.add_argument("-x", "--TEx", dest="TE_x", action="store", default="risk_ij",
                         help="Variable measured at the source (X)", choices=TE_X_CHOICES)
     
     parser.add_argument("-y", "--TEy", dest="TE_y", action="store", default="new_cases_by_100k",
                         help="Variable measured at the destination (Y)", choices=TE_Y_CHOICES)
+
+    parser.add_argument("--use_ete", action="store", dest="use_ete", default=True, 
+                         help="Calculate ETE using shuffles")
+
+    parser.add_argument("--shuffles", action="store", dest="shuffles", default=100, type=int,
+                         help="Nº shuffles to compute ETE")
     
     parser.add_argument("-c", "--cpus", action="store", dest="cpus", default=None, type=int,
                          help="Nº of cpus use for parallel calculation")
-
-    parser.add_argument("--ete", action="store_true",
-                         help="Calculate ETE using shuffles")
-    
-    parser.add_argument("--shuffles", action="store", dest="shuffles", default=100, type=int,
-                         help="Nº shuffles to compute ETE")
 
     parser.add_argument("--debug", action="store_true",
                          help="Run a single TE calculation for debuggin prouposes")
 
     return parser
 
-
 ##################################################
 
-EMBEDDINGS   = ("uniform", "round", "symbolic")
+EMBEDDINGS   = ("standard", "round", "symbolic")
 TE_X_CHOICES = ("risk_ij", "risk_hat_ij", "new_cases_by_100k", "new_cases")
 TE_Y_CHOICES = ("new_cases_by_100k", "new_cases")
 
@@ -276,9 +286,11 @@ def main():
     TE_y        = args.TE_y
 
     embedding_params = {}
-    embedding_params["embedding"]         = args.embedding
-    embedding_params["nbins"]             = args.nbins
-    embedding_params["symmetric_binning"] = args.symmetric_binning
+    embedding_params["diff"]      = args.diff
+    embedding_params["embedding"] = args.embedding
+    embedding_params["q1"]        = args.q1
+    embedding_params["q2"]        = args.q2
+    
 
     te_params = {}
     te_params["k"]        = args.k
@@ -287,7 +299,7 @@ def main():
     te_params["s"]        = args.s
     te_params["TE_x"]     = args.TE_x
     te_params["TE_y"]     = args.TE_y
-    te_params["ETE"]      = args.ete
+    te_params["ETE"]      = args.use_ete
     te_params["shuffles"] = args.shuffles
 
     # Getting the data folder
@@ -310,17 +322,17 @@ def main():
     assert cases_ds.coords['id'].shape   == risk_ds.coords['source'].shape
     assert cases_ds.coords['id'].shape   == risk_ds.coords['target'].shape
 
-    params_strn = f"w{args.omega}_d{args.delta}_{str.upper(args.embedding[0])}"
-    if args.ete:
-        params_strn = f"ETE_{params_strn}"
-    if args.embedding == "uniform":
-        aux = str.upper(str(args.symmetric_binning)[0])
-        params_strn += f"_nbin{args.nbins}_sb{aux}"
+    if args.use_ete:
+        params_strn = "ETE"
+    else:
+        params_strn = "TE"
+    params_strn += f"_w{args.omega}_d{args.delta}_{str.upper(args.embedding[0])}"
+    if args.embedding == "standard":
+        params_strn += f"_q1{args.q1}_q2{args.q2}"
 
     params_strn += f"_{args.TE_x}"
     print(f"- Creating output folder for storing run outpus, config, etc:")
-    today = date.today()
-    strn_date = today.strftime("%Y%m%d")
+    
     output_folder = os.path.join(base_folder, f"run_{params_strn}")
     count = 1
     while os.path.exists(output_folder):
@@ -346,13 +358,13 @@ def main():
     end_date    = date_range[-1]
 
     print(f"Encoding data using \"{args.embedding}\" embedding")
-    if TE_x == "risk_hat_ij":
-        X = encode_data(risk_ds[TE_x] * 5, **embedding_params)
-    elif TE_x == "risk_ij":
-        X = encode_data(risk_ds[TE_x], **embedding_params)
+    
+    if TE_x == "risk_ij" or TE_x == "risk_hat_ij":
+        X = risk_ds[TE_x]
     else:
-        X = encode_data(cases_ds[TE_y], **embedding_params)
+        X = cases_ds[TE_y]
 
+    X = encode_data(X, **embedding_params)
     Y = encode_data(cases_ds[TE_y], **embedding_params)
 
     print(f"- Calculating Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
@@ -392,9 +404,7 @@ def main():
 
     # correct offset of the TE by shifting dates to (w-d)
     i,j,te_ij = RESULT_LIST[0]
-    n = te_ij.shape[0]
     omega = te_params["omega"]
-    delta = te_params["delta"]
     start = int(omega)
     TE_dates = date_range[start:]
     end = min(len(TE_dates), te_ij.shape[0])

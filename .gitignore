@@ -1,3 +1,4 @@
+python/.ipynb_checkpoints/*
 notebooks/.ipynb_checkpoints/*
 outputs/*
 data/*.npy

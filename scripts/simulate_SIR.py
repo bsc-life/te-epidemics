@@ -45,7 +45,7 @@ def validate_config_parameters(config_dict):
                     "dt_save": {"type": "number"},
                     "r0": {"type": "number"},
                     "mu": {"type": "number"},
-                    "z0_idx": {"type": "number"},
+                    "hub_idx": {"type": "number"},
                 },
             },
         },
@@ -60,8 +60,7 @@ def validate_config_parameters(config_dict):
     assert config_dict["model_params"]["dt_save"] >= config_dict["model_params"]["dt"]
     assert config_dict["model_params"]["r0"] > 0
     assert config_dict["model_params"]["mu"] > 0
-    assert config_dict["model_params"]["z0_idx"] >= 0
-
+    assert config_dict["model_params"]["hub_idx"] >= 0
     assert config_dict["n_replicates"] >= 1
 
     return True
@@ -74,26 +73,26 @@ def create_parser():
 
     parser.add_argument("mobility_matrix_file", help="Mobility matrix file")
 
-    parser.add_argument("--dt", dest="dt", default=0.1, type=float,
+    parser.add_argument("-dt", dest="dt", default=0.1, type=float,
                          help="Simulation timestep")
 
-    parser.add_argument("--tmax", dest="t_max", default=300, type=int,
+    parser.add_argument("-tmax", dest="t_max", default=300, type=int,
                         help="Simulation time")
 
-    parser.add_argument("--dt_save", dest="dt_save", default=1, type=float,
+    parser.add_argument("-dt_save", dest="dt_save", default=1, type=float,
                          help="Time interval to save the simulation")
 
-    parser.add_argument("--i0", dest="i0", default=10, type=int,
+    parser.add_argument("-i0", dest="i0", default=10, type=int,
                          help="s parameter for the TE. Is the offset of the sliding window")
 
-    parser.add_argument("--r0", dest="r0", default=1.5, type=float,
+    parser.add_argument("-r0", dest="r0", default=1.5, type=float,
                          help="Infection rate")
 
-    parser.add_argument("--mu", dest="mu", default=1, type=float,
+    parser.add_argument("-mu", dest="mu", default=1, type=float,
                          help="mu")
 
-    parser.add_argument("--z0", dest="z0_idx", default=0, type=int,
-                        help="Index of zone 0 node where the epidemic starts")
+    parser.add_argument("-hub", dest="hub_idx", default=0, type=int,
+                        help="Index of hub node where the epidemic starts")
 
     parser.add_argument("-n", "--nreplicates", dest="n_replicates", default=500, type=int,
                          help="Number of simulation replicates")
@@ -113,10 +112,13 @@ def error_callback(e):
     print("Error accoured while calculating TE", e)
 
 def log_result(result):
+    susceptible = np.array(result['S'])
+    new_cases = -np.diff(susceptible, prepend=1, axis=0)
+    #print(susceptible.shape, new_cases.shape)
     cases_density = np.array(result['I'])
     arrival_time = np.array(result['T_arrival'])
     time = np.array(result['t'])
-    RESULT_LIST.append((cases_density, arrival_time, time))
+    RESULT_LIST.append((cases_density, new_cases, arrival_time, time))
 
 RESULT_LIST = None
 
@@ -145,7 +147,7 @@ def main():
     model_params["i0"]          = args.i0
     model_params["mu"]          = args.mu
     model_params["r0"]          = args.r0
-    model_params["z0_idx"]     = args.z0_idx
+    model_params["hub_idx"]     = args.hub_idx
 
     topology = args.mobility_matrix_file.split("_")[1]
     output_folder = os.path.join(base_outfolder, f"SIR_simulation_{topology}")
@@ -174,7 +176,8 @@ def main():
     config["model_params"] = model_params
     validate_config_parameters(config)
 
-    mobility = np.load(mobility_matrix_file)
+    mobility = np.loadtxt(open(mobility_matrix_file, "rb"), delimiter=",")[:50,:50]
+    #mobility = np.load(mobility_matrix_file)
     subpopulation_sizes = np.sum(mobility, axis=0)
     N = len(subpopulation_sizes)
     
@@ -182,7 +185,7 @@ def main():
     model = SIRModel(
                 mobility,
                 subpopulation_sizes,
-                outbreak_source = args.z0_idx,     # random outbreak location
+                outbreak_source = args.hub_idx,     # random outbreak location
                 dt = args.dt,                       # simulation time interval
                 dt_save = args.dt_save,             # time interval when to save observables
                 I0 = args.i0,                       # number of initial infected
@@ -218,19 +221,25 @@ def main():
     dates = pd.date_range(start='2020-03-01', periods=args.t_max+1)
     patches = ['H'] + [f"L{i}" for i in range(1,N)]
 
-    data = np.zeros((len(dates), N, len(RESULT_LIST)),dtype=float)
+    cd_data = np.zeros((len(dates), N, len(RESULT_LIST)),dtype=float)
+    nc_data = np.zeros((len(dates), N, len(RESULT_LIST)),dtype=float)
 
     LAG = 7
     for i,rep in enumerate(RESULT_LIST):
         for j in range(N):
-            data[LAG:,j,i] = rep[0][:-LAG,j] #* subpopulation_sizes[j]
+            cd_data[LAG:,j,i] = rep[0][:-LAG,j] #* subpopulation_sizes[j]
+            nc_data[LAG:,j,i] = rep[1][:-LAG,j]
         
-    da_inf = xr.DataArray(data, coords=[dates, patches, range(1,n_replicates+1)], dims=["date", "id", "rep"])
+    da_inf = xr.DataArray(cd_data, coords=[dates, patches, range(1,n_replicates+1)], dims=["date", "id", "rep"])
+    da_newcases = xr.DataArray(nc_data, coords=[dates, patches, range(1,n_replicates+1)], dims=["date", "id", "rep"])
 
     da_subpop  = xr.DataArray(subpopulation_sizes, coords=[patches], dims=["id"])
 
     da_cases = da_inf.mean(dim="rep") 
+    da_newcases = da_newcases.mean(dim="rep")
+
     da_cases = da_cases.transpose("id", "date")
+    da_newcases = da_newcases.transpose("id", "date")
    
     mobility_exp = mobility+mobility.T
     np.fill_diagonal(mobility_exp, 0)
@@ -245,8 +254,9 @@ def main():
     da_risk_hat *= density_scale
 
 
-    cases_ds = xr.Dataset(data_vars={"new_cases":da_cases})
-    cases_ds["new_cases_by_100k"] = da_cases * density_scale
+    cases_ds = xr.Dataset(data_vars={"total_cases":da_cases})
+    cases_ds["total_cases_by_100k"] = cases_ds["total_cases"] * 100000
+    cases_ds["new_cases_by_100k"] = da_newcases * 100000
     print(cases_ds)
 
     risk_ds = xr.Dataset(data_vars={"risk_ij":da_risk, "risk_hat_ij":da_risk_hat})

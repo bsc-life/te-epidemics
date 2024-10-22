@@ -132,7 +132,7 @@ def encode_data(data, diff=True, embedding="standard", q1=-1, q2=1, m=3):
 #########################################################################
 
 def error_callback(e):
-    raise Exception("Error accoured while calculating TE")
+    raise Exception(f"Error accoured while calculating TE {e}")
 
 def log_result(result):
     RESULT_LIST.append(result)
@@ -148,8 +148,8 @@ def effective_transfer_entropy(x, y, k=1, shuffles=500):
     ETE_xy = TE_xy - TE_xy_s
     return ETE_xy
 
-def calculate_te(source, target, TE_x="risk_ij", s=1, 
-                 omega=21, delta=5, k=1, ETE=False, shuffles=500,
+def _calculate_te_dynamic(source, target, TE_x="risk_ij", s=1, 
+                 omega=28, delta=14, k=1, ETE=False, shuffles=500,
                  **kargs):
     if TE_x=="risk_ij":
         X_ij = X.loc[source, target, :].to_pandas()
@@ -186,7 +186,7 @@ def calculate_te(source, target, TE_x="risk_ij", s=1,
     TE[TE < 0] = 0
     return (source, target, TE)
 
-def results2xarray(data, patches_ids, date_range):
+def _results2xarray(data, patches_ids, date_range):
     i, j, te_ij = data[0]
     m = te_ij.shape[0]
     n = len(patches_ids)
@@ -200,9 +200,117 @@ def results2xarray(data, patches_ids, date_range):
         if np.isnan(entropy).any():
             entropy[np.isnan(entropy)] = 0
         nda[i, j, :] = entropy
+
     TE_da = xr.DataArray(nda, dims=("source", "target", "date"), 
                          coords={"source": patches_ids, "target": patches_ids, "date": date_range})
     return TE_da
+
+def compute_TE_dynamic(te_params, cpus=8):
+    global RESULT_TE_dynamic
+    patches_ids = Y.coords["id"].values
+    date_range  = Y.coords["date"].to_pandas().index
+
+    RESULT_TE_dynamic = []
+    print(f"- Computing Dynamic TE... ", end=" ")
+    if cpus > 1:
+        print(f"Running in parallel using {cpus} cpus.")
+        pool = mp.Pool(cpus)
+        for i,j in product(patches_ids, repeat=2):
+            pool.apply_async(_calculate_te_dynamic, args=(i, j), kwds=te_params, 
+                            callback=lambda x: RESULT_TE_dynamic.append(x), 
+                            error_callback=error_callback)
+        pool.close()
+        pool.join()
+    else:
+        print("Running sequentialy.")
+        for i, j in product(patches_ids, repeat=2):
+            i, j, te_ij = _calculate_te_dynamic(i, j, **te_params)
+            print(f"- calculating TE({i}->{j}):")
+            RESULT_TE_dynamic.append((i, j, te_ij))
+
+    # correct offset of the TE by shifting dates to (w-d)
+    i,j,te_ij = RESULT_TE_dynamic[0]
+    omega = te_params["omega"]
+    start = int(omega)
+    TE_dates = date_range[start:]
+    end = min(len(TE_dates), te_ij.shape[0])
+    TE_dates = TE_dates[:end]
+    TE_xa = _results2xarray(RESULT_TE_dynamic, patches_ids, TE_dates)
+
+    return TE_xa
+
+def _calculate_te_global(source, target, TE_x="risk_ij", delta=14, k=1, 
+                         ETE=False, shuffles=500, **kargs):
+    if TE_x=="risk_ij":
+        X_ij = X.loc[source, target, :].to_pandas()
+    elif TE_x=="risk_hat_ij":
+        X_ij = X.loc[source, target, :].to_pandas()
+    elif TE_x=="new_cases_by_100k":
+        X_ij = Y.loc[source, :].to_pandas()
+    elif TE_x=="new_cases":
+        X_ij = Y.loc[source, :].to_pandas()
+    else:
+        raise Exception(f"Unknown TEx param {TE_x}")
+
+    Y_j = Y.loc[target, :].to_pandas()
+
+    assert X_ij.shape[0] == Y_j.shape[0]
+    
+    # Filter self loops
+    if source == target: 
+        return (source, target, 0)
+    
+    x = X_ij[:-delta].values.copy()
+    y = Y_j[delta:].values.copy()
+    
+    assert x.shape[0] == y.shape[0]
+    TE = 0
+    if ETE:
+        TE = effective_transfer_entropy(x, y, k=k, shuffles=shuffles)
+    else:
+        TE = transfer_entropy(x, y, k)
+   
+    return (source, target, TE)
+
+
+def compute_TE_global(te_params, cpus=8):
+    global RESULT_TE_global
+    RESULT_TE_global = []
+    patches_ids = Y.coords["id"].values
+    print(f"- Computing Global TE... ", end=" ")
+    if cpus > 1:
+        print(f"Running in parallel using {cpus} cpus.")
+        pool = mp.Pool(cpus)
+        for i,j in product(patches_ids, repeat=2):
+            pool.apply_async(_calculate_te_global, args=(i, j), kwds=te_params, 
+                            callback=lambda x: RESULT_TE_global.append(x), error_callback=error_callback)
+        pool.close()
+        pool.join()
+    else:
+        print("Running sequentialy.")
+        for i, j in product(patches_ids, repeat=2):
+            i, j, te_ij = _calculate_te_global(i, j, **te_params)
+            print(f"- calculating TE({i}->{j}):")
+            RESULT_TE_global.append((i, j, te_ij))
+    
+    n = len(patches_ids)
+    data = np.zeros((n,n))
+    patch_indexer = {k:i for i,k in enumerate(patches_ids)}
+    for source,target,te_ij in RESULT_TE_global:
+        i = patch_indexer[source]
+        j = patch_indexer[target]
+        if np.isinf(te_ij):
+            te_ij = 0
+        if np.isnan(te_ij):
+            te_ij = 0
+        data[i, j] = te_ij
+    
+    return xr.DataArray(data, 
+                        dims=("source", "target"), 
+                        coords={"source": patches_ids, "target": patches_ids})
+
+    
+
 
 def create_parser():
 
@@ -333,15 +441,12 @@ def main():
     print(f"- Creating output folder for storing run outpus, config, etc:")
     
     output_folder = os.path.join(base_folder, f"run_{params_strn}")
-    count = 1
-    while os.path.exists(output_folder):
-        count += 1
-        output_folder = os.path.join(base_folder, f"run_{params_strn}_{count}")
+
 
     output_folder = os.path.abspath(output_folder)
     print(f"\t{output_folder}")
-    
-    os.mkdir(output_folder)
+    if not os.path.exists(output_folder):    
+        os.mkdir(output_folder)
     params_fname = os.path.join(output_folder, "params.json")
     te_ds_fname  = os.path.join(output_folder, "TE.nc")
 
@@ -378,51 +483,51 @@ def main():
     for k,v in te_params.items():
         print(f"\t* {k}: {v}")
 
-    print(f"- Calculating Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
-
-    RESULT_LIST = []
+    
     if debug:
         print("- Running debugg")
         i = "28"; j = "33"
         print(f"- calculating TE({i}->{j}):")
-        i, j, te_ij = calculate_te(i, j, **te_params)
+        i, j, te_ij = _calculate_te_dynamic(i, j, **te_params)
         # i, j, te_ij = calc_te(i, j, date_range, **te_params)
         print(f"\t{i} -> {j} = {te_ij.sum()}\n")
         sys.exit(0)
     
-    print(f"- Computing TE... ", end=" ")
-    if cpus > 1:
-        print(f"Running in parallel using {cpus} cpus.")
-        pool = mp.Pool(cpus)
-        for i,j in product(patches_ids, repeat=2):
-            pool.apply_async(calculate_te, args=(i, j), kwds=te_params, 
-                            callback=log_result, error_callback=error_callback)
-        pool.close()
-        pool.join()
-    else:
-        print("Running sequentialy.")
-        for i, j in product(patches_ids, repeat=2):
-            i, j, te_ij = calculate_te(i, j, **te_params)
-            print(f"- calculating TE({i}->{j}):")
-            print(f"\t{i} -> {j} = {te_ij.sum()}\n")
-            RESULT_LIST.append((i, j, te_ij))
 
-    print("\t* Done!")
+    te_params["ETE"] = False
+    print(f"- Calculating dynamic Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
+    TE_dynamic = compute_TE_dynamic(te_params, cpus=cpus)
+    print(f"- Done")
 
-    # correct offset of the TE by shifting dates to (w-d)
-    i,j,te_ij = RESULT_LIST[0]
-    omega = te_params["omega"]
-    start = int(omega)
-    TE_dates = date_range[start:]
-    end = min(len(TE_dates), te_ij.shape[0])
-    TE_dates = TE_dates[:end]
+    te_params["ETE"] = True
+    print(f"- Calculating dynamic Effective Transfer Entropy between {len(patches_ids)} zones from {start_date} to {end_date}")
+    ETE_dynamic = compute_TE_dynamic(te_params, cpus=cpus)
+    print(f"- Done")
+    
+    print(f"- Calculating Global Transfer Entropy")
+    te_params["ETE"] = False
+    TE_global = compute_TE_global(te_params, cpus=cpus)
+    print(f"- Done")
 
-    TE_ds = results2xarray(RESULT_LIST, patches_ids, TE_dates)
-    total_te = TE_ds.sum(dim="date")
-    print(f"\t* Total Entropy Transfered: {total_te.values.sum():.2f}")
+    print(f"- Calculating Global Effective Transfer Entropy")
+    te_params["ETE"] = True
+    ETE_global = compute_TE_global(te_params, cpus=cpus)
+    print(f"- Done")
+
+
+    
+    retuls_ds = xr.Dataset(
+        {
+            "TE_dynamic": (["source", "target", "date"], TE_dynamic.data),
+            "ETE_dynamic": (["source", "target", "date"], ETE_dynamic.data),
+            "TE_global": (["source", "target"], TE_global.data),
+            "ETE_global": (["source", "target"], ETE_global.data)
+        },
+        coords=TE_dynamic.coords
+    )
 
     print(f"\t* Writing final results to {te_ds_fname}")
-    TE_ds.to_netcdf(te_ds_fname)
+    retuls_ds.to_netcdf(te_ds_fname)
     print(f"\t* Writing config to {params_fname}")
 
     params_dict = {"te_params": te_params, "embedding": embedding_params}
